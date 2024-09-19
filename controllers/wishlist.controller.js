@@ -1,31 +1,28 @@
-const {
-  WishlistModel,
-  ProductAnalyticModel,
-  ProductModel,
-} = require("../models");
+const { WishlistModel } = require("../models");
+const { getProductInfo } = require("../producers/product-info-producer");
 const logger = require("../config/logger");
-
-const handleRequest = async (req, res, operation) => {
-  try {
-    const result = await operation(req);
-    res.status(200).json(result);
-  } catch (error) {
-    logger.error(`Error in ${operation.name}: ${error}`);
-    res
-      .status(error.status || 500)
-      .json({ error: error.message || "Internal Server Error" });
-  }
-};
+const { handleRequest, createError } = require("../services/responseHandler");
 
 const WishlistController = {
   getWishlist: (req, res) =>
     handleRequest(req, res, async (req) => {
+      if (!req.user || !req.user._id) {
+        throw createError("User not authenticated", 401, "UNAUTHORIZED");
+      }
       const customer_id = req.user._id.toString();
       const wishlistItems = await WishlistModel.getWishlist(customer_id);
 
+      if (!wishlistItems || wishlistItems.length === 0) {
+        return []; // Return an empty array if the wishlist is empty
+      }
+
       const detailedWishlist = await Promise.all(
         wishlistItems.map(async (product_id) => {
-          const product = await ProductModel.getProductById(product_id);
+          const product = await getProductInfo(product_id);
+          if (!product) {
+            logger.warn(`Product ${product_id} not found for wishlist item`);
+            return null; // Skip this item if the product is not found
+          }
 
           const totalStock = product.variants.reduce(
             (sum, variant) => sum + variant.stock,
@@ -48,34 +45,72 @@ const WishlistController = {
         })
       );
 
-      return detailedWishlist;
+      return detailedWishlist.filter((item) => item !== null); // Remove any null items
     }),
 
   addToWishlist: (req, res) =>
     handleRequest(req, res, async (req) => {
+      if (!req.user || !req.user._id) {
+        throw createError("User not authenticated", 401, "UNAUTHORIZED");
+      }
       const customer_id = req.user._id.toString();
       const { product_id } = req.params;
+
+      if (!product_id) {
+        throw createError("Product ID is required", 400, "MISSING_PRODUCT_ID");
+      }
+
+      const product = await getProductInfo(product_id);
+      if (!product) {
+        throw createError("Product not found", 404, "PRODUCT_NOT_FOUND");
+      }
+
       await WishlistModel.addToWishlist(customer_id, product_id);
-      // await ProductAnalyticModel.updateValueAnalyticProduct(
-      //   product_id,
-      //   "wishlist",
-      //   1
-      // );
       return { success: "Added product to wishlist successfully" };
     }),
 
   removeFromWishlist: (req, res) =>
     handleRequest(req, res, async (req) => {
+      if (!req.user || !req.user._id) {
+        throw createError("User not authenticated", 401, "UNAUTHORIZED");
+      }
       const customer_id = req.user._id.toString();
       const { product_id } = req.params;
+
+      if (!product_id) {
+        throw createError("Product ID is required", 400, "MISSING_PRODUCT_ID");
+      }
+
       logger.info(`Removing product ${product_id} from wishlist`);
-      return await WishlistModel.removeFromWishlist(customer_id, product_id);
+      const result = await WishlistModel.removeFromWishlist(
+        customer_id,
+        product_id
+      );
+      if (!result) {
+        throw createError(
+          "Product not found in wishlist",
+          404,
+          "PRODUCT_NOT_IN_WISHLIST"
+        );
+      }
+      return { success: "Removed product from wishlist successfully" };
     }),
 
   clearWishlist: (req, res) =>
     handleRequest(req, res, async (req) => {
+      if (!req.user || !req.user._id) {
+        throw createError("User not authenticated", 401, "UNAUTHORIZED");
+      }
       const customer_id = req.user._id.toString();
-      return await WishlistModel.clearWishlist(customer_id);
+      const result = await WishlistModel.clearWishlist(customer_id);
+      if (!result) {
+        throw createError(
+          "Failed to clear wishlist",
+          500,
+          "CLEAR_WISHLIST_FAILED"
+        );
+      }
+      return { success: "Wishlist cleared successfully" };
     }),
 };
 

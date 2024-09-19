@@ -1,6 +1,7 @@
 const { getDB } = require("../config/mongoDB");
 const Joi = require("joi");
 const { ObjectId } = require("mongodb");
+const { createError } = require("../services/responseHandler");
 
 const COLLECTION_NAME = "payments";
 const COLLECTION_SCHEMA = Joi.object({
@@ -11,9 +12,10 @@ const COLLECTION_SCHEMA = Joi.object({
   updated_at: Joi.date().default(Date.now),
 }).options({ abortEarly: false });
 
-const validateInvoice = (invoiceData) => {
-  const { error } = COLLECTION_SCHEMA.validate(invoiceData);
-  if (error) throw error;
+const validatePayment = (paymentData) => {
+  const { error } = COLLECTION_SCHEMA.validate(paymentData);
+  if (error)
+    throw createError(error.details[0].message, 400, "VALIDATION_ERROR");
 };
 
 const handleDBOperation = async (operation) => {
@@ -22,7 +24,11 @@ const handleDBOperation = async (operation) => {
     return await operation(db.collection(COLLECTION_NAME));
   } catch (error) {
     console.error(`Error in ${operation.name}: `, error);
-    throw error;
+    throw createError(
+      `Database operation failed: ${error.message}`,
+      500,
+      "DB_OPERATION_FAILED"
+    );
   }
 };
 
@@ -30,7 +36,19 @@ const PaymentModel = {
   // when customer create order
   createPayment: async (paymentData, session) => {
     return handleDBOperation(async (collection) => {
-      console.log(paymentData);
+      if (
+        !paymentData ||
+        !paymentData.order_id ||
+        !paymentData.customer_id ||
+        !paymentData.seller_id
+      ) {
+        throw createError(
+          "Missing required payment data",
+          400,
+          "MISSING_REQUIRED_FIELDS"
+        );
+      }
+
       const payment = {
         order_id: new ObjectId(paymentData.order_id),
         customer_id: new ObjectId(paymentData.customer_id),
@@ -41,7 +59,17 @@ const PaymentModel = {
         updated_at: new Date(),
       };
 
+      validatePayment(payment);
+
       const result = await collection.insertOne(payment, { session });
+
+      if (!result.insertedId) {
+        throw createError(
+          "Failed to create payment",
+          500,
+          "PAYMENT_CREATION_FAILED"
+        );
+      }
 
       return {
         message: "Payment created successfully",
@@ -52,20 +80,46 @@ const PaymentModel = {
 
   getPayment: async (order_id) => {
     return handleDBOperation(async (collection) => {
-      return await collection.findOne({ order_id: order_id });
+      if (!order_id) {
+        throw createError("Order ID is required", 400, "MISSING_ORDER_ID");
+      }
+
+      const payment = await collection.findOne({
+        order_id: new ObjectId(order_id),
+      });
+
+      if (!payment) {
+        throw createError("Payment not found", 404, "PAYMENT_NOT_FOUND");
+      }
+
+      return payment;
     });
   },
 
   // when seller accepted order or refused order
   updateStatus: async (payment_id, newStatus) => {
     return handleDBOperation(async (collection) => {
+      if (!payment_id || !newStatus) {
+        throw createError(
+          "Payment ID and new status are required",
+          400,
+          "MISSING_REQUIRED_FIELDS"
+        );
+      }
+
       const result = await collection.updateOne(
         { _id: new ObjectId(payment_id) },
-        { $set: { payment_status: newStatus, updated_at: new Date() } }
+        { $set: { status: newStatus, updated_at: new Date() } }
       );
+
       if (result.modifiedCount === 0) {
-        throw new Error("Payment not found or status not changed");
+        throw createError(
+          "Payment not found or status not changed",
+          404,
+          "PAYMENT_UPDATE_FAILED"
+        );
       }
+
       return { message: "Payment status updated successfully" };
     });
   },

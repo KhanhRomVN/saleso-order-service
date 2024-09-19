@@ -1,85 +1,111 @@
-const {
-  ReturnModel,
-  OrderModel,
-  UserModel,
-  ReversalModel,
-  ProductModel,
-  RefundModel,
-} = require("../models");
-const logger = require("../config/logger");
+const { PaymentModel } = require("../models");
+const { handleRequest, createError } = require("../services/responseHandler");
 
-const handleRequest = async (req, res, operation) => {
-  try {
-    const result = await operation(req);
-    res.status(200).json(result);
-  } catch (error) {
-    logger.error(`Error in ${operation.name}: ${error}`);
-    res
-      .status(error.status || 500)
-      .json({ error: error.message || "Internal Server Error" });
-  }
-};
-
-const ReversalController = {
-  reversalOrder: (req, res) =>
+const PaymentController = {
+  createPayment: (req, res) =>
     handleRequest(req, res, async (req) => {
-      const customer_id = req.user._id.toString();
-      const { order_id } = req.params;
-      const { reason } = req.body;
-      const order = await OrderModel.getOrderById(order_id);
-      if (order.customer_id !== customer_id) {
-        return { error: "You do not have authority to return this order" };
+      if (!req.user || !req.user._id) {
+        throw createError("User not authenticated", 401, "UNAUTHORIZED");
       }
-      const reversalData = {
+      const { order_id, method, status } = req.body;
+      if (!order_id || !method || !status) {
+        throw createError(
+          "Missing required fields",
+          400,
+          "MISSING_REQUIRED_FIELDS"
+        );
+      }
+      const paymentData = {
         order_id,
-        customer_id,
-        seller_id: order.seller_id,
-        reason,
-        status: "pending",
+        customer_id: req.user._id.toString(),
+        method,
+        status,
       };
-      await ReversalModel.reversalOrder(reversalData);
-      return { message: "Your return request has been successful" };
-    }),
-
-  getListReversal: (req, res) =>
-    handleRequest(req, res, async (req) => {
-      const seller_id = req.user._id.toString();
-      const { status } = req.params;
-      return await ReversalModel.getListReversal(seller_id, status);
-    }),
-
-  getReversal: (req, res) =>
-    handleRequest(req, res, async (req) => {
-      const { reversal_id } = req.params;
-      const seller_id = req.user._id.toString();
-      const reversal = await ReversalModel.getReversalById(reversal_id);
-      if (reversal.seller_id !== seller_id) {
-        return { error: "You do not have authority to view this return" };
+      const result = await PaymentModel.createPayment(paymentData);
+      if (!result) {
+        throw createError(
+          "Failed to create payment",
+          500,
+          "PAYMENT_CREATION_FAILED"
+        );
       }
-      return reversal;
+      return {
+        message: "Payment created successfully",
+        payment_id: result._id,
+      };
     }),
 
-  acceptReversal: (req, res) =>
+  getPayment: (req, res) =>
+    handleRequest(req, res, async (req) => {
+      const { payment_id } = req.params;
+      if (!payment_id) {
+        throw createError("Payment ID is required", 400, "MISSING_PAYMENT_ID");
+      }
+      const payment = await PaymentModel.getPaymentById(payment_id);
+      if (!payment) {
+        throw createError("Payment not found", 404, "PAYMENT_NOT_FOUND");
+      }
+      return payment;
+    }),
+
+  updatePaymentStatus: (req, res) =>
+    handleRequest(req, res, async (req) => {
+      if (!req.user || !req.user._id) {
+        throw createError("User not authenticated", 401, "UNAUTHORIZED");
+      }
+      const { payment_id } = req.params;
+      const { status } = req.body;
+      if (!payment_id || !status) {
+        throw createError(
+          "Payment ID and status are required",
+          400,
+          "MISSING_REQUIRED_FIELDS"
+        );
+      }
+      const result = await PaymentModel.updatePaymentStatus(payment_id, status);
+      if (!result) {
+        throw createError(
+          "Failed to update payment status",
+          500,
+          "PAYMENT_UPDATE_FAILED"
+        );
+      }
+      return { message: "Payment status updated successfully" };
+    }),
+
+  getPaymentsByOrder: (req, res) =>
     handleRequest(req, res, async (req) => {
       const { order_id } = req.params;
-      const seller_id = req.user._id.toString();
-      const reversal = await ReversalModel.getReversalByOrderId(order_id);
-      if (reversal.seller_id !== seller_id) {
-        return { error: "You do not have authority to accept this return" };
+      if (!order_id) {
+        throw createError("Order ID is required", 400, "MISSING_ORDER_ID");
       }
-      return await ReversalModel.acceptReversal(order_id);
+      const payments = await PaymentModel.getPaymentsByOrderId(order_id);
+      if (!payments || payments.length === 0) {
+        throw createError(
+          "No payments found for this order",
+          404,
+          "NO_PAYMENTS_FOUND"
+        );
+      }
+      return payments;
     }),
 
-  refuseReversal: (req, res) =>
+  getPaymentsByCustomer: (req, res) =>
     handleRequest(req, res, async (req) => {
-      const { order_id } = req.params;
-      const seller_id = req.user._id.toString();
-      const reversal = await ReversalModel.getReversalByOrderId(order_id);
-      if (reversal.seller_id !== seller_id) {
-        return { error: "You do not have authority to refuse this return" };
+      if (!req.user || !req.user._id) {
+        throw createError("User not authenticated", 401, "UNAUTHORIZED");
       }
-      return await ReversalModel.refuseReversal(order_id);
+      const customer_id = req.user._id.toString();
+      const payments = await PaymentModel.getPaymentsByCustomerId(customer_id);
+      if (!payments || payments.length === 0) {
+        throw createError(
+          "No payments found for this customer",
+          404,
+          "NO_PAYMENTS_FOUND"
+        );
+      }
+      return payments;
     }),
 };
 
-module.exports = ReversalController;
+module.exports = PaymentController;
