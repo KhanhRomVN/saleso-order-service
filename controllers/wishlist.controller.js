@@ -1,5 +1,5 @@
 const { WishlistModel } = require("../models");
-const { getProductInfo } = require("../producers/product-info-producer");
+const { getProductById } = require("../queue/producers/product-producer");
 const logger = require("../config/logger");
 const { handleRequest, createError } = require("../services/responseHandler");
 
@@ -18,7 +18,7 @@ const WishlistController = {
 
       const detailedWishlist = await Promise.all(
         wishlistItems.map(async (product_id) => {
-          const product = await getProductInfo(product_id);
+          const product = await getProductById(product_id);
           if (!product) {
             logger.warn(`Product ${product_id} not found for wishlist item`);
             return null; // Skip this item if the product is not found
@@ -60,7 +60,7 @@ const WishlistController = {
         throw createError("Product ID is required", 400, "MISSING_PRODUCT_ID");
       }
 
-      const product = await getProductInfo(product_id);
+      const product = await getProductById(product_id);
       if (!product) {
         throw createError("Product not found", 404, "PRODUCT_NOT_FOUND");
       }

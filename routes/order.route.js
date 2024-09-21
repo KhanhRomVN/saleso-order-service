@@ -18,7 +18,7 @@ const routes = [
   {
     method: "get",
     path: "/:status",
-    middleware: [authToken, rateLimiter],
+    middleware: [authToken],
     handler: OrderController.getListOrder,
   },
   {
@@ -33,18 +33,18 @@ const routes = [
     middleware: [authCustomerToken, rateLimiter],
     handler: OrderController.cancelOrder,
   },
-  {
-    method: "put",
-    path: "/accept/:order_id",
-    middleware: [authSellerToken, rateLimiter],
-    handler: OrderController.acceptOrder,
-  },
-  {
-    method: "put",
-    path: "/refuse/:order_id",
-    middleware: [authSellerToken, rateLimiter],
-    handler: OrderController.refuseOrder,
-  },
+  // {
+  //   method: "put",
+  //   path: "/accept/:order_id",
+  //   middleware: [authSellerToken, rateLimiter],
+  //   handler: OrderController.acceptOrder,
+  // },
+  // {
+  //   method: "put",
+  //   path: "/refuse/:order_id",
+  //   middleware: [authSellerToken, rateLimiter],
+  //   handler: OrderController.refuseOrder,
+  // },
 ];
 
 routes.forEach(({ method, path, middleware = [], handler }) => {

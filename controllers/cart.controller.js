@@ -1,6 +1,6 @@
 const { CartModel } = require("../models");
+const { getProductById } = require("../queue/producers/product-producer");
 const { handleRequest, createError } = require("../services/responseHandler");
-const { getProductInfo } = require("../producers/product-info-producer");
 
 const CartController = {
   getCart: (req, res) =>
@@ -18,7 +18,7 @@ const CartController = {
       // Map over the items array to add product details
       const itemsWithDetails = await Promise.all(
         cart.items.map(async (item) => {
-          const product = await getProductInfo(item.product_id);
+          const product = await getProductById(item.product_id);
           if (!product) {
             throw createError(
               `Product not found: ${item.product_id}`,

@@ -4,21 +4,22 @@ const {
   CartModel,
   ReversalModel,
 } = require("../models");
-const { getProductInfo } = require("../producers/product-info-producer");
-const { getUserInfo } = require("../producers/user-info-producer");
-const { getVariantInfo } = require("../producers/varian-info-producer");
+const { getProductById } = require("../queue/producers/product-producer");
+const { getUserById } = require("../queue/producers/user-producer");
 const logger = require("../config/logger");
 const { startSession } = require("../config/mongoDB");
 const { handleRequest, createError } = require("../services/responseHandler");
+const {
+  updateVariantStock,
+  getVariantBySku,
+} = require("../queue/producers/variant-producer");
 
 const OrderController = {
   createOrder: (req, res) =>
     handleRequest(req, res, async (req) => {
-      if (!req.user || !req.user._id) {
-        throw createError("User not authenticated", 401, "UNAUTHORIZED");
-      }
       const customer_id = req.user._id.toString();
       const { orderItems, payment_method, payment_status } = req.body;
+      console.log(req.body);
 
       if (!Array.isArray(orderItems) || orderItems.length === 0) {
         throw createError("Invalid order items", 400, "INVALID_ORDER_ITEMS");
@@ -27,78 +28,87 @@ const OrderController = {
       const session = await startSession();
 
       try {
-        let createdOrderIds;
+        session.startTransaction();
 
-        await session.withTransaction(async () => {
-          // 1. Process orders and update stock
-          const processedOrders = await Promise.all(
-            orderItems.map(async (item) => {
-              const product = await getProductInfo(item.product_id);
-              if (!product) {
-                throw createError(
-                  `Product not found: ${item.product_id}`,
-                  404,
-                  "PRODUCT_NOT_FOUND"
-                );
-              }
+        const orderItemsWithDetails = await Promise.all(
+          orderItems.map(async (item) => {
+            const product = await getProductById(item.product_id);
+            if (!product) {
+              throw createError(
+                `Product not found: ${item.product_id}`,
+                404,
+                "PRODUCT_NOT_FOUND"
+              );
+            }
 
-              // Update stock logic should be moved to product service
-              // and called via RabbitMQ
+            const variant = product.variants.find(
+              (v) => v._id.toString() === item.variant_id
+            );
+            if (!variant) {
+              throw createError(
+                `Variant not found: ${item.variant_id}`,
+                404,
+                "VARIANT_NOT_FOUND"
+              );
+            }
 
-              return {
-                ...item,
-                customer_id,
-                seller_id: product.seller_id,
-                order_status: "pending",
-              };
-            })
-          );
+            if (variant.stock < item.quantity) {
+              throw createError(
+                `Insufficient stock for variant: ${item.variant_id}`,
+                400,
+                "INSUFFICIENT_STOCK"
+              );
+            }
 
-          // 2. Create orders
-          createdOrderIds = await OrderModel.createOrders(
-            processedOrders,
+            return {
+              ...item,
+              product_name: product.name,
+              variant_name: variant.name,
+              price: variant.price,
+            };
+          })
+        );
+
+        const totalAmount = orderItemsWithDetails.reduce(
+          (sum, item) => sum + item.price * item.quantity,
+          0
+        );
+
+        const newOrder = await OrderModel.createOrder(
+          {
             customer_id,
-            session
-          );
+            orderItems: orderItemsWithDetails,
+            totalAmount,
+            payment_method,
+            payment_status,
+          },
+          { session }
+        );
 
-          // 3. Create payments
-          await Promise.all(
-            createdOrderIds.map(async (order) => {
-              const paymentData = {
-                order_id: order.order_id,
-                customer_id,
-                seller_id: order.seller_id,
-                method: payment_method,
-                status: payment_status,
-              };
-              await PaymentModel.createPayment(paymentData, session);
-            })
-          );
+        await Promise.all(
+          orderItemsWithDetails.map(async (item) => {
+            await updateVariantStock(
+              item.product_id,
+              item.variant_id,
+              -item.quantity,
+              { session }
+            );
+          })
+        );
 
-          // 4. Remove items from cart
-          await Promise.all(
-            orderItems.map(async (item) => {
-              await CartModel.removeItem(customer_id, item.product_id, session);
-            })
-          );
+        await CartModel.clearCart(customer_id, { session });
 
-          logger.info(
-            `Orders created successfully for customer ${customer_id}`
-          );
-        });
-
-        return {
-          message: "Order created successfully",
-          orderIds: createdOrderIds.map((order) => order.order_id),
-        };
+        await session.commitTransaction();
+        return newOrder;
       } catch (error) {
+        await session.abortTransaction();
         logger.error(
           `Error creating order for customer ${customer_id}: ${error.message}`
         );
         throw createError(
-          error.message,
-          error.status || 500,
-          error.code || "ORDER_CREATION_FAILED"
+          "Failed to create order",
+          500,
+          "ORDER_CREATION_FAILED"
         );
       } finally {
         await session.endSession();
@@ -107,17 +117,10 @@ const OrderController = {
 
   getListOrder: (req, res) =>
     handleRequest(req, res, async (req) => {
-      if (!req.user || !req.user._id) {
-        throw createError("User not authenticated", 401, "UNAUTHORIZED");
-      }
       const { status } = req.params;
       const user_id = req.user._id.toString();
       const role = req.user.role;
       const orders = await OrderModel.getListOrder(user_id, role, status);
-
-      if (!orders || orders.length === 0) {
-        throw createError("No orders found", 404, "NO_ORDERS_FOUND");
-      }
 
       return await Promise.all(
         orders.map(async (order) => {
@@ -132,8 +135,8 @@ const OrderController = {
               shipping_address,
               order_status,
             } = order;
-            const product = await getProductInfo(product_id);
-            const customer = await getUserInfo(customer_id, "customer");
+            const product = await ProductMode.getProductById(product_id);
+            const customer = await getUserById(customer_id, "customer");
             orderData = {
               _id,
               product_id,
@@ -151,10 +154,10 @@ const OrderController = {
             const { applied_discount, updated_at, ...cleanedOrder } = order;
             orderData = cleanedOrder;
 
-            const variant = await getVariantInfo(order.sku);
+            const variant = await getVariantBySku(order.sku);
             orderData.sku_name = variant ? variant.variant : null;
 
-            const product = await getProductInfo(order.product_id);
+            const product = await getProductById(order.product_id);
             if (product) {
               orderData.product_name = product.name;
               orderData.product_image = product.images[0] || null;
@@ -181,63 +184,173 @@ const OrderController = {
   getOrder: (req, res) =>
     handleRequest(req, res, async (req) => {
       const { order_id } = req.params;
-      if (!order_id) {
-        throw createError("Order ID is required", 400, "MISSING_ORDER_ID");
-      }
+      const customer_id = req.user._id.toString();
       const order = await OrderModel.getOrder(order_id);
       if (!order) {
         throw createError("Order not found", 404, "ORDER_NOT_FOUND");
+      }
+      if (order.customer_id !== customer_id) {
+        throw createError(
+          "Unauthorized access to order",
+          403,
+          "UNAUTHORIZED_ACCESS"
+        );
       }
       return order;
     }),
 
   cancelOrder: (req, res) =>
     handleRequest(req, res, async (req) => {
-      if (!req.user || !req.user._id) {
-        throw createError("User not authenticated", 401, "UNAUTHORIZED");
-      }
       const { order_id } = req.params;
-      if (!order_id) {
-        throw createError("Order ID is required", 400, "MISSING_ORDER_ID");
-      }
       const customer_id = req.user._id.toString();
       const orderData = await OrderModel.getOrder(order_id);
       if (!orderData) {
         throw createError("Order not found", 404, "ORDER_NOT_FOUND");
       }
       if (customer_id !== orderData.customer_id) {
-        throw createError("You cannot cancel this order", 403, "FORBIDDEN");
+        throw createError(
+          "You cannot cancel this order",
+          403,
+          "UNAUTHORIZED_CANCEL"
+        );
       }
       await OrderModel.cancelOrder(order_id, customer_id);
       return { message: "Order cancelled successfully" };
     }),
 
-  acceptOrder: (req, res) =>
+  updateOrderStatus: (req, res) =>
     handleRequest(req, res, async (req) => {
-      if (!req.user || !req.user._id) {
-        throw createError("User not authenticated", 401, "UNAUTHORIZED");
-      }
       const { order_id } = req.params;
-      if (!order_id) {
-        throw createError("Order ID is required", 400, "MISSING_ORDER_ID");
+      const { status } = req.body;
+      const updatedOrder = await OrderModel.updateOrderStatus(order_id, status);
+      if (!updatedOrder) {
+        throw createError(
+          "Order not found or status update failed",
+          404,
+          "ORDER_UPDATE_FAILED"
+        );
       }
-      const seller_id = req.user._id.toString();
-      await OrderModel.acceptOrder(order_id, seller_id);
-      return { message: "Order accepted successfully" };
+      return updatedOrder;
     }),
 
-  refuseOrder: (req, res) =>
+  getOrdersByStatus: (req, res) =>
     handleRequest(req, res, async (req) => {
-      if (!req.user || !req.user._id) {
-        throw createError("User not authenticated", 401, "UNAUTHORIZED");
-      }
+      const { status } = req.params;
+      const orders = await OrderModel.getOrdersByStatus(status);
+      return orders;
+    }),
+
+  refundOrder: (req, res) =>
+    handleRequest(req, res, async (req) => {
       const { order_id } = req.params;
-      if (!order_id) {
-        throw createError("Order ID is required", 400, "MISSING_ORDER_ID");
+      const { refund_amount, refund_reason } = req.body;
+
+      const order = await OrderModel.getOrder(order_id);
+      if (!order) {
+        throw createError("Order not found", 404, "ORDER_NOT_FOUND");
       }
-      const seller_id = req.user._id.toString();
-      await OrderModel.refuseOrder(order_id, seller_id);
-      return { message: "Order refused successfully" };
+
+      if (order.status !== "completed") {
+        throw createError(
+          "Only completed orders can be refunded",
+          400,
+          "INVALID_ORDER_STATUS"
+        );
+      }
+
+      if (refund_amount > order.totalAmount) {
+        throw createError(
+          "Refund amount cannot exceed the order total",
+          400,
+          "INVALID_REFUND_AMOUNT"
+        );
+      }
+
+      const session = await startSession();
+      try {
+        session.startTransaction();
+
+        const refund = await PaymentModel.createRefund(
+          order_id,
+          refund_amount,
+          refund_reason,
+          { session }
+        );
+
+        await OrderModel.updateOrderStatus(order_id, "refunded", { session });
+
+        await session.commitTransaction();
+        return refund;
+      } catch (error) {
+        await session.abortTransaction();
+        logger.error(`Error refunding order ${order_id}: ${error.message}`);
+        throw createError(
+          "Failed to process refund",
+          500,
+          "REFUND_PROCESSING_FAILED"
+        );
+      } finally {
+        await session.endSession();
+      }
+    }),
+
+  getOrderAnalytics: (req, res) =>
+    handleRequest(req, res, async (req) => {
+      const { startDate, endDate } = req.query;
+      const analytics = await OrderModel.getOrderAnalytics(startDate, endDate);
+      return analytics;
+    }),
+
+  getReversals: (req, res) =>
+    handleRequest(req, res, async (req) => {
+      const reversals = await ReversalModel.getReversals();
+      return reversals;
+    }),
+
+  createReversal: (req, res) =>
+    handleRequest(req, res, async (req) => {
+      const { order_id, reason } = req.body;
+      const order = await OrderModel.getOrder(order_id);
+      if (!order) {
+        throw createError("Order not found", 404, "ORDER_NOT_FOUND");
+      }
+
+      const session = await startSession();
+      try {
+        session.startTransaction();
+
+        const reversal = await ReversalModel.createReversal(order_id, reason, {
+          session,
+        });
+
+        await OrderModel.updateOrderStatus(order_id, "reversed", { session });
+
+        await Promise.all(
+          order.orderItems.map(async (item) => {
+            await updateVariantStock(
+              item.product_id,
+              item.variant_id,
+              item.quantity,
+              { session }
+            );
+          })
+        );
+
+        await session.commitTransaction();
+        return reversal;
+      } catch (error) {
+        await session.abortTransaction();
+        logger.error(
+          `Error creating reversal for order ${order_id}: ${error.message}`
+        );
+        throw createError(
+          "Failed to create reversal",
+          500,
+          "REVERSAL_CREATION_FAILED"
+        );
+      } finally {
+        await session.endSession();
+      }
     }),
 };
 

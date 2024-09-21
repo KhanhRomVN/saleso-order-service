@@ -10,9 +10,6 @@ const http = require("http");
 //* MongoDB
 const { connectDB } = require("./config/mongoDB");
 
-//* RabbitMQ
-const { connectRabbitMQ } = require("./config/rabbitmq");
-
 //* Routes
 const routes = require("./routes");
 
@@ -56,7 +53,7 @@ app.use((err, res) => {
 //* Start Server
 const PORT = process.env.PORT || 8082;
 
-Promise.all([connectDB(), connectRabbitMQ()])
+Promise.all([connectDB()])
   .then(() => {
     server.listen(PORT, () => {
       console.log(`Server is running on port: ${PORT}`);
