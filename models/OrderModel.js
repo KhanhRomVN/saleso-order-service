@@ -15,7 +15,7 @@ const COLLECTION_SCHEMA = Joi.object({
   applied_discount: Joi.string(),
   total_amount: Joi.number().required(),
   order_status: Joi.string()
-    .valid("pending", "accepted", "refused", "reversed")
+    .valid("pending", "accepted", "refused", "reversed", "cancelled")
     .required(),
   create_at: Joi.date().default(Date.now),
   update_at: Joi.date().default(Date.now),
@@ -95,7 +95,7 @@ const OrderModel = {
     });
   },
 
-  getOrder: async (order_id) => {
+  getOrderById: async (order_id) => {
     return handleDBOperation(async (collection) => {
       if (!order_id) {
         throw createError("Order ID is required", 400, "MISSING_ORDER_ID");
@@ -117,55 +117,10 @@ const OrderModel = {
           "MISSING_REQUIRED_FIELDS"
         );
       }
-      const result = await collection.deleteOne({
-        _id: new ObjectId(order_id),
-        customer_id: customer_id,
-      });
-      if (result.deletedCount === 0) {
-        throw createError(
-          "Order not found or already cancelled",
-          404,
-          "ORDER_NOT_FOUND"
-        );
-      }
-      return { message: "Order cancelled successfully" };
-    });
-  },
-
-  updateOrderStatus: async (order_id, newStatus) => {
-    return handleDBOperation(async (collection) => {
-      if (!order_id || !newStatus) {
-        throw createError(
-          "Order ID and new status are required",
-          400,
-          "MISSING_REQUIRED_FIELDS"
-        );
-      }
-      const result = await collection.updateOne(
-        { _id: new ObjectId(order_id) },
-        { $set: { order_status: newStatus, updated_at: new Date() } }
+      await collection.updateOne(
+        { _id: new ObjectId(order_id), customer_id: customer_id },
+        { $set: { order_status: "cancelled", updated_at: new Date() } }
       );
-      if (result.modifiedCount === 0) {
-        throw createError(
-          "Order not found or status not changed",
-          404,
-          "ORDER_UPDATE_FAILED"
-        );
-      }
-      return { message: "Order status updated successfully" };
-    });
-  },
-
-  getOrderById: async (order_id) => {
-    return handleDBOperation(async (collection) => {
-      if (!order_id) {
-        throw createError("Order ID is required", 400, "MISSING_ORDER_ID");
-      }
-      const order = await collection.findOne({ _id: new ObjectId(order_id) });
-      if (!order) {
-        throw createError("Order not found", 404, "ORDER_NOT_FOUND");
-      }
-      return order;
     });
   },
 

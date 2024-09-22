@@ -1,5 +1,8 @@
 const { WishlistModel } = require("../models");
 const { getProductById } = require("../queue/producers/product-producer");
+const {
+  updateValueAnalyticProduct,
+} = require("../queue/producers/product-analytic-producer");
 const logger = require("../config/logger");
 const { handleRequest, createError } = require("../services/responseHandler");
 
@@ -66,6 +69,7 @@ const WishlistController = {
       }
 
       await WishlistModel.addToWishlist(customer_id, product_id);
+      await updateValueAnalyticProduct(product_id, "wishlist_added", 1);
       return { success: "Added product to wishlist successfully" };
     }),
 
@@ -93,6 +97,7 @@ const WishlistController = {
           "PRODUCT_NOT_IN_WISHLIST"
         );
       }
+      await updateValueAnalyticProduct(product_id, "wishlist_removed", 1);
       return { success: "Removed product from wishlist successfully" };
     }),
 

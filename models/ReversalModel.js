@@ -29,117 +29,62 @@ const handleDBOperation = async (operation) => {
 };
 
 const ReversalModel = {
-  reversalOrder: async (reversalData) => {
+  createReversal: async (order_id, reason, customer_id, seller_id) => {
     return handleDBOperation(async (collection) => {
-      const { error } = COLLECTION_SCHEMA.validate(reversalData);
-      if (error)
-        throw createError(error.details[0].message, 400, "VALIDATION_ERROR");
-
-      const result = await collection.insertOne(reversalData);
-      if (!result.insertedId) {
-        throw createError(
-          "Failed to create reversal",
-          500,
-          "REVERSAL_CREATION_FAILED"
-        );
-      }
-      return {
-        message: "Reversal created successfully",
-        reversal_id: result.insertedId,
+      const newReversal = {
+        order_id,
+        customer_id,
+        seller_id,
+        reason,
+        status: "pending",
+        created_at: new Date(),
+        updated_at: new Date(),
       };
-    });
-  },
-
-  getListReversal: async (seller_id, status) => {
-    return handleDBOperation(async (collection) => {
-      if (!seller_id || !status) {
-        throw createError(
-          "Seller ID and status are required",
-          400,
-          "MISSING_REQUIRED_FIELDS"
-        );
-      }
-      const reversals = await collection.find({ seller_id, status }).toArray();
-      if (reversals.length === 0) {
-        return []; // Return an empty array if no reversals found
-      }
-      return reversals;
-    });
-  },
-
-  getReversalById: async (reversal_id) => {
-    return handleDBOperation(async (collection) => {
-      if (!reversal_id) {
-        throw createError(
-          "Reversal ID is required",
-          400,
-          "MISSING_REVERSAL_ID"
-        );
-      }
-      const reversal = await collection.findOne({
-        _id: new ObjectId(reversal_id),
-      });
-      if (!reversal) {
-        throw createError("Reversal not found", 404, "REVERSAL_NOT_FOUND");
-      }
-      return reversal;
+      await collection.insertOne(newReversal);
+      return { message: "Reversal created successfully", data: newReversal };
     });
   },
 
   getReversalByOrderId: async (order_id) => {
     return handleDBOperation(async (collection) => {
-      if (!order_id) {
-        throw createError("Order ID is required", 400, "MISSING_ORDER_ID");
-      }
       const reversal = await collection.findOne({ order_id });
-      if (!reversal) {
-        throw createError(
-          "Reversal not found for this order",
-          404,
-          "REVERSAL_NOT_FOUND"
-        );
-      }
-      return reversal;
+      return { data: reversal };
     });
   },
 
-  acceptReversal: async (order_id) => {
+  acceptReversal: async (order_id, seller_id) => {
     return handleDBOperation(async (collection) => {
-      if (!order_id) {
-        throw createError("Order ID is required", 400, "MISSING_ORDER_ID");
-      }
-      const result = await collection.updateOne(
-        { order_id },
-        { $set: { status: "accepted", updated_at: new Date() } }
+      const result = await collection.findOneAndUpdate(
+        { order_id, seller_id, status: "pending" },
+        { $set: { status: "accepted", updated_at: new Date() } },
+        { returnDocument: "after" }
       );
-      if (result.modifiedCount === 0) {
+      if (!result.value) {
         throw createError(
-          "Reversal not found or already accepted",
+          "Reversal not found or already processed",
           404,
           "REVERSAL_UPDATE_FAILED"
         );
       }
-      return { message: "Reversal accepted successfully" };
+      return { message: "Reversal accepted successfully", data: result.value };
     });
   },
 
-  refuseReversal: async (order_id) => {
+  refuseReversal: async (order_id, seller_id) => {
     return handleDBOperation(async (collection) => {
-      if (!order_id) {
-        throw createError("Order ID is required", 400, "MISSING_ORDER_ID");
-      }
-      const result = await collection.updateOne(
-        { order_id },
-        { $set: { status: "refused", updated_at: new Date() } }
+      const result = await collection.findOneAndUpdate(
+        { order_id, seller_id, status: "pending" },
+        { $set: { status: "refused", updated_at: new Date() } },
+        { returnDocument: "after" }
       );
-      if (result.modifiedCount === 0) {
+      if (!result.value) {
         throw createError(
-          "Reversal not found or already refused",
+          "Reversal not found or already processed",
           404,
           "REVERSAL_UPDATE_FAILED"
         );
       }
-      return { message: "Reversal refused successfully" };
+      return { message: "Reversal refused successfully", data: result.value };
     });
   },
 };

@@ -1,15 +1,15 @@
 const express = require("express");
-const { PaymentController } = require("../controllers");
+const { OrderLogController } = require("../controllers");
 const { authSellerToken } = require("../middleware/authToken");
 const router = express.Router();
 
 const routes = [
-  //   {
-  //     method: "get",
-  //     path: "/",
-  //     middleware: [authSellerToken],
-  //     handler: PaymentController.getListPendingOrder,
-  //   },
+  {
+    method: "get",
+    path: "/",
+    middleware: [authSellerToken],
+    handler: OrderLogController.getOrderLogByOrderId,
+  },
 ];
 
 routes.forEach(({ method, path, middleware = [], handler }) => {

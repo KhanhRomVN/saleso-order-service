@@ -1,4 +1,13 @@
 const { CartModel } = require("../models");
+const {
+  updateValueAnalyticProduct,
+} = require("../queue/producers/product-analytic-producer");
+const {
+  sendCreateNewNotification,
+} = require("../queue/producers/notification-producer");
+const {
+  sendGetAllowNotificationPreference,
+} = require("../queue/producers/notification-preference-producer");
 const { getProductById } = require("../queue/producers/product-producer");
 const { handleRequest, createError } = require("../services/responseHandler");
 
@@ -72,6 +81,9 @@ const CartController = {
         throw createError("Product ID is required", 400, "MISSING_PRODUCT_ID");
       }
       await CartModel.addItem(customer_id, req.body);
+      // product analytic
+      await updateValueAnalyticProduct(req.body.product_id, "cart_added", 1);
+
       return { message: "Item added to cart successfully" };
     }),
 
@@ -86,6 +98,7 @@ const CartController = {
       }
       const customer_id = req.user._id.toString();
       await CartModel.removeItem(customer_id, product_id);
+      await updateValueAnalyticProduct(product_id, "cart_removed", 1);
       return { message: "Item removed from cart successfully" };
     }),
 

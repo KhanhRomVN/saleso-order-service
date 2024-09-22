@@ -1,111 +1,136 @@
-const { PaymentModel } = require("../models");
-const { handleRequest, createError } = require("../services/responseHandler");
+const { ReversalModel, OrderModel, OrderLogModel } = require("../models");
+const { handleRequest } = require("../services/responseHandler");
+const {
+  updateValueAnalyticProduct,
+} = require("../queue/producers/product-analytic-producer");
 
-const PaymentController = {
-  createPayment: (req, res) =>
-    handleRequest(req, res, async (req) => {
-      if (!req.user || !req.user._id) {
-        throw createError("User not authenticated", 401, "UNAUTHORIZED");
-      }
-      const { order_id, method, status } = req.body;
-      if (!order_id || !method || !status) {
-        throw createError(
-          "Missing required fields",
-          400,
-          "MISSING_REQUIRED_FIELDS"
-        );
-      }
-      const paymentData = {
-        order_id,
-        customer_id: req.user._id.toString(),
-        method,
-        status,
-      };
-      const result = await PaymentModel.createPayment(paymentData);
-      if (!result) {
-        throw createError(
-          "Failed to create payment",
-          500,
-          "PAYMENT_CREATION_FAILED"
-        );
-      }
-      return {
-        message: "Payment created successfully",
-        payment_id: result._id,
-      };
-    }),
-
-  getPayment: (req, res) =>
-    handleRequest(req, res, async (req) => {
-      const { payment_id } = req.params;
-      if (!payment_id) {
-        throw createError("Payment ID is required", 400, "MISSING_PAYMENT_ID");
-      }
-      const payment = await PaymentModel.getPaymentById(payment_id);
-      if (!payment) {
-        throw createError("Payment not found", 404, "PAYMENT_NOT_FOUND");
-      }
-      return payment;
-    }),
-
-  updatePaymentStatus: (req, res) =>
-    handleRequest(req, res, async (req) => {
-      if (!req.user || !req.user._id) {
-        throw createError("User not authenticated", 401, "UNAUTHORIZED");
-      }
-      const { payment_id } = req.params;
-      const { status } = req.body;
-      if (!payment_id || !status) {
-        throw createError(
-          "Payment ID and status are required",
-          400,
-          "MISSING_REQUIRED_FIELDS"
-        );
-      }
-      const result = await PaymentModel.updatePaymentStatus(payment_id, status);
-      if (!result) {
-        throw createError(
-          "Failed to update payment status",
-          500,
-          "PAYMENT_UPDATE_FAILED"
-        );
-      }
-      return { message: "Payment status updated successfully" };
-    }),
-
-  getPaymentsByOrder: (req, res) =>
+const ReversalController = {
+  createReversal: async (req, res) => {
     handleRequest(req, res, async (req) => {
       const { order_id } = req.params;
-      if (!order_id) {
-        throw createError("Order ID is required", 400, "MISSING_ORDER_ID");
-      }
-      const payments = await PaymentModel.getPaymentsByOrderId(order_id);
-      if (!payments || payments.length === 0) {
-        throw createError(
-          "No payments found for this order",
-          404,
-          "NO_PAYMENTS_FOUND"
-        );
-      }
-      return payments;
-    }),
+      const { seller_id } = await OrderModel.getOrderById(order_id);
+      const { reason } = req.body;
+      const { customer_id } = req.user._id.toString();
+      await ReversalModel.createReversal(
+        order_id,
+        reason,
+        customer_id,
+        seller_id
+      );
+      await updateValueAnalyticProduct(seller_id, "reversal_requested", 1);
 
-  getPaymentsByCustomer: (req, res) =>
+      // get allowed notification preference
+      const allowedNotificationPreference =
+        await sendGetAllowNotificationPreference(customer_id);
+
+      // create notification
+      if (allowedNotificationPreference.order_notification) {
+        const notificationData = {
+          title: "Reversal requested",
+          content: `Customer ${customer_id} has requested a reversal for order ${order_id}`,
+          notification_type: "order_notification",
+          target_type: "individual",
+          target_ids: [seller_id],
+          can_delete: false,
+          can_mark_as_read: true,
+          is_read: false,
+          created_at: new Date(),
+        };
+        await sendCreateNewNotification(notificationData);
+      }
+
+      // Create order log
+      const orderLogData = {
+        order_id,
+        title: "Reversal created",
+        content: "Reversal created successfully",
+        created_at: new Date(),
+      };
+      await OrderLogModel.newOrderLog(orderLogData);
+
+      return { message: "Reversal created successfully" };
+    });
+  },
+
+  acceptReversal: async (req, res) => {
     handleRequest(req, res, async (req) => {
-      if (!req.user || !req.user._id) {
-        throw createError("User not authenticated", 401, "UNAUTHORIZED");
+      const { order_id } = req.params;
+      const seller_id = req.user._id.toString();
+      await ReversalModel.acceptReversal(order_id, seller_id);
+      await updateValueAnalyticProduct(seller_id, "reversal_accepted", 1);
+
+      // get allowed notification preference
+      const allowedNotificationPreference =
+        await sendGetAllowNotificationPreference(seller_id);
+
+      // create notification
+      if (allowedNotificationPreference.order_notification) {
+        const notificationData = {
+          title: "Reversal accepted",
+          content: `Seller ${seller_id} has accepted the reversal for order ${order_id}`,
+          notification_type: "order_notification",
+          target_type: "individual",
+          target_ids: [customer_id],
+          can_delete: false,
+          can_mark_as_read: true,
+          is_read: false,
+          created_at: new Date(),
+        };
+        await sendCreateNewNotification(notificationData);
       }
-      const customer_id = req.user._id.toString();
-      const payments = await PaymentModel.getPaymentsByCustomerId(customer_id);
-      if (!payments || payments.length === 0) {
-        throw createError(
-          "No payments found for this customer",
-          404,
-          "NO_PAYMENTS_FOUND"
-        );
+
+      // Create order log
+      const orderLogData = {
+        order_id,
+        title: "Reversal accepted",
+        content: "Reversal accepted successfully",
+        created_at: new Date(),
+      };
+      await OrderLogModel.newOrderLog(orderLogData);
+
+      return { message: "Reversal accepted successfully" };
+    });
+  },
+
+  refuseReversal: async (req, res) => {
+    handleRequest(req, res, async (req) => {
+      const { order_id } = req.params;
+      const seller_id = req.user._id.toString();
+      await ReversalModel.refuseReversal(order_id, seller_id);
+      await updateValueAnalyticProduct(seller_id, "reversal_refused", 1);
+
+      // get allowed notification preference
+      const allowedNotificationPreference =
+        await sendGetAllowNotificationPreference(seller_id);
+
+      // create notification
+      if (allowedNotificationPreference.order_notification) {
+        const notificationData = {
+          title: "Reversal refused",
+          content: `Seller ${seller_id} has refused the reversal for order ${order_id}`,
+          notification_type: "order_notification",
+          target_type: "individual",
+          target_ids: [customer_id],
+          can_delete: false,
+          can_mark_as_read: true,
+          is_read: false,
+          created_at: new Date(),
+        };
+        await sendCreateNewNotification(notificationData);
       }
-      return payments;
-    }),
+
+      // Create order log
+      const orderLogData = {
+        order_id,
+        title: "Reversal refused",
+        content: "Reversal refused successfully",
+        created_at: new Date(),
+      };
+      await OrderLogModel.newOrderLog(orderLogData);
+
+      return { message: "Reversal refused successfully" };
+    });
+  },
 };
 
-module.exports = PaymentController;
+module.exports = ReversalController;

@@ -2,114 +2,159 @@ const {
   OrderModel,
   PaymentModel,
   CartModel,
+  OrderLogModel,
   ReversalModel,
 } = require("../models");
-const { getProductById } = require("../queue/producers/product-producer");
+
+const {
+  getProductById,
+  updateStockProduct,
+} = require("../queue/producers/product-producer");
 const { getUserById } = require("../queue/producers/user-producer");
+const {
+  updateValueAnalyticProduct,
+} = require("../queue/producers/product-analytic-producer");
 const logger = require("../config/logger");
 const { startSession } = require("../config/mongoDB");
 const { handleRequest, createError } = require("../services/responseHandler");
+const { sendGetVariantBySku } = require("../queue/producers/variant-producer");
 const {
-  updateVariantStock,
-  getVariantBySku,
-} = require("../queue/producers/variant-producer");
+  sendCreateNewNotification,
+} = require("../queue/producers/notification-producer");
+const {
+  sendGetAllowNotificationPreference,
+} = require("../queue/producers/notification-preference-producer");
 
 const OrderController = {
   createOrder: (req, res) =>
     handleRequest(req, res, async (req) => {
       const customer_id = req.user._id.toString();
       const { orderItems, payment_method, payment_status } = req.body;
-      console.log(req.body);
 
       if (!Array.isArray(orderItems) || orderItems.length === 0) {
-        throw createError("Invalid order items", 400, "INVALID_ORDER_ITEMS");
+        throw new Error("Invalid order items");
       }
 
       const session = await startSession();
 
       try {
-        session.startTransaction();
+        let createdOrderIds;
+        await session.withTransaction(async () => {
+          // 1. Process orders and update stock
+          const processedOrders = await Promise.all(
+            orderItems.map(async (item) => {
+              const product = await getProductById(item.product_id, session);
+              if (!product) {
+                throw new Error(`Product not found: ${item.product_id}`);
+              }
 
-        const orderItemsWithDetails = await Promise.all(
-          orderItems.map(async (item) => {
-            const product = await getProductById(item.product_id);
-            if (!product) {
-              throw createError(
-                `Product not found: ${item.product_id}`,
-                404,
-                "PRODUCT_NOT_FOUND"
+              await updateStockProduct(
+                item.product_id,
+                -item.quantity,
+                item.sku,
+                session
               );
-            }
 
-            const variant = product.variants.find(
-              (v) => v._id.toString() === item.variant_id
-            );
-            if (!variant) {
-              throw createError(
-                `Variant not found: ${item.variant_id}`,
-                404,
-                "VARIANT_NOT_FOUND"
-              );
-            }
+              return {
+                ...item,
+                customer_id,
+                seller_id: product.seller_id,
+                order_status: "pending",
+              };
+            })
+          );
 
-            if (variant.stock < item.quantity) {
-              throw createError(
-                `Insufficient stock for variant: ${item.variant_id}`,
-                400,
-                "INSUFFICIENT_STOCK"
-              );
-            }
-
-            return {
-              ...item,
-              product_name: product.name,
-              variant_name: variant.name,
-              price: variant.price,
-            };
-          })
-        );
-
-        const totalAmount = orderItemsWithDetails.reduce(
-          (sum, item) => sum + item.price * item.quantity,
-          0
-        );
-
-        const newOrder = await OrderModel.createOrder(
-          {
+          // 2. Create orders
+          createdOrderIds = await OrderModel.createOrders(
+            processedOrders,
             customer_id,
-            orderItems: orderItemsWithDetails,
-            totalAmount,
-            payment_method,
-            payment_status,
-          },
-          { session }
-        );
+            session
+          );
 
-        await Promise.all(
-          orderItemsWithDetails.map(async (item) => {
-            await updateVariantStock(
-              item.product_id,
-              item.variant_id,
-              -item.quantity,
-              { session }
+          // 3. Create payments
+          await Promise.all(
+            createdOrderIds.map(async (order) => {
+              const paymentData = {
+                order_id: order.order_id,
+                customer_id,
+                seller_id: order.seller_id,
+                method: payment_method,
+                status: payment_status,
+                amount: order.total_amount, // Assuming total_amount is available in the order object
+              };
+              await PaymentModel.createPayment(paymentData, session);
+            })
+          );
+
+          // 4. Remove items from cart
+          await Promise.all(
+            orderItems.map(async (item) => {
+              await CartModel.removeItem(customer_id, item.product_id, session);
+            })
+          );
+
+          // 5. Update Product Analytic
+          await Promise.all(
+            processedOrders.map(async (item) => {
+              await updateValueAnalyticProduct(
+                item.product_id,
+                "orders_placed",
+                1
+              );
+            })
+          );
+
+          // 6. Create order log
+          await Promise.all(
+            createdOrderIds.map(async (order) => {
+              const orderLogData = {
+                order_id: order.order_id,
+                title: "Order created",
+                content: "Order created successfully",
+                created_at: new Date(),
+              };
+              await OrderLogModel.newOrderLog(orderLogData);
+            })
+          );
+
+          // 7. get allowed notification preference
+          const allowedNotificationPreference =
+            await sendGetAllowNotificationPreference(customer_id);
+
+          // 8. create notification
+          if (allowedNotificationPreference.order_created) {
+            await Promise.all(
+              createdOrderIds.map(async (order) => {
+                const notificationData = {
+                  title: "Order created",
+                  content: `You have a new order from ${order.customer_id}`,
+                  notification_type: "order_notification",
+                  target_type: "individual",
+                  target_ids: [order.seller_id],
+                  can_delete: false,
+                  can_mark_as_read: true,
+                  is_read: false,
+                  created_at: new Date(),
+                };
+                await sendCreateNewNotification(notificationData);
+              })
             );
-          })
-        );
+          }
 
-        await CartModel.clearCart(customer_id, { session });
+          logger.info(
+            `Orders created successfully for customer ${customer_id}`
+          );
+        });
 
-        await session.commitTransaction();
-        return newOrder;
+        return {
+          message: "Order created successfully",
+          orderIds: createdOrderIds.map((order) => order.order_id),
+        };
       } catch (error) {
-        await session.abortTransaction();
         logger.error(
           `Error creating order for customer ${customer_id}: ${error.message}`
         );
-        throw createError(
-          "Failed to create order",
-          500,
-          "ORDER_CREATION_FAILED"
-        );
+        throw error;
       } finally {
         await session.endSession();
       }
@@ -154,7 +199,7 @@ const OrderController = {
             const { applied_discount, updated_at, ...cleanedOrder } = order;
             orderData = cleanedOrder;
 
-            const variant = await getVariantBySku(order.sku);
+            const variant = await sendGetVariantBySku(order.sku);
             orderData.sku_name = variant ? variant.variant : null;
 
             const product = await getProductById(order.product_id);
@@ -185,7 +230,7 @@ const OrderController = {
     handleRequest(req, res, async (req) => {
       const { order_id } = req.params;
       const customer_id = req.user._id.toString();
-      const order = await OrderModel.getOrder(order_id);
+      const order = await OrderModel.getOrderById(order_id);
       if (!order) {
         throw createError("Order not found", 404, "ORDER_NOT_FOUND");
       }
@@ -215,142 +260,137 @@ const OrderController = {
         );
       }
       await OrderModel.cancelOrder(order_id, customer_id);
+
+      // get allowed notification preference
+      const allowedNotificationPreference =
+        await sendGetAllowNotificationPreference(customer_id);
+
+      // create notification
+      if (allowedNotificationPreference.order_cancelled) {
+        const notificationData = {
+          title: "Order cancelled",
+          content: `Customer ${customer_id} has cancelled the order`,
+          notification_type: "order_notification",
+          target_type: "individual",
+          target_ids: [orderData.seller_id],
+          can_delete: false,
+          can_mark_as_read: true,
+          is_read: false,
+        };
+        await sendCreateNewNotification(notificationData);
+      }
+
+      // Create order log
+      const orderLogData = {
+        order_id,
+        title: "Order cancelled",
+        content: "Order cancelled successfully",
+        created_at: new Date(),
+      };
+
+      await OrderLogModel.newOrderLog(orderLogData);
+
+      // Product analytic
+      await updateValueAnalyticProduct(
+        orderData.product_id,
+        "orders_cancelled",
+        1
+      );
       return { message: "Order cancelled successfully" };
     }),
 
-  updateOrderStatus: (req, res) =>
+  acceptOrder: (req, res) =>
     handleRequest(req, res, async (req) => {
       const { order_id } = req.params;
-      const { status } = req.body;
-      const updatedOrder = await OrderModel.updateOrderStatus(order_id, status);
-      if (!updatedOrder) {
-        throw createError(
-          "Order not found or status update failed",
-          404,
-          "ORDER_UPDATE_FAILED"
-        );
+      const seller_id = req.user._id.toString();
+      const orderData = await OrderModel.getOrder(order_id);
+      if (!orderData) {
+        throw createError("Order not found", 404, "ORDER_NOT_FOUND");
       }
-      return updatedOrder;
+      await OrderModel.acceptOrder(order_id, seller_id);
+
+      // get allowed notification preference
+      const allowedNotificationPreference =
+        await sendGetAllowNotificationPreference(customer_id);
+
+      // create notification
+      if (allowedNotificationPreference.order_accepted) {
+        const notificationData = {
+          title: "Order accepted",
+          content: `Order ${order_id} has been accepted by ${seller_id}`,
+          notification_type: "order_notification",
+          target_type: "individual",
+          target_ids: [orderData.customer_id],
+          can_delete: false,
+          can_mark_as_read: true,
+          is_read: false,
+          created_at: new Date(),
+        };
+        await sendCreateNewNotification(notificationData);
+      }
+
+      // Create order log
+      const orderLogData = {
+        order_id,
+        title: "Order accepted",
+        content: "Order accepted successfully",
+        created_at: new Date(),
+      };
+      await OrderLogModel.newOrderLog(orderLogData);
+
+      // Product analytic
+      await updateValueAnalyticProduct(
+        orderData.product_id,
+        "orders_accepted",
+        1
+      );
     }),
 
-  getOrdersByStatus: (req, res) =>
-    handleRequest(req, res, async (req) => {
-      const { status } = req.params;
-      const orders = await OrderModel.getOrdersByStatus(status);
-      return orders;
-    }),
-
-  refundOrder: (req, res) =>
+  refuseOrder: (req, res) =>
     handleRequest(req, res, async (req) => {
       const { order_id } = req.params;
-      const { refund_amount, refund_reason } = req.body;
-
-      const order = await OrderModel.getOrder(order_id);
-      if (!order) {
+      const seller_id = req.user._id.toString();
+      const orderData = await OrderModel.getOrder(order_id);
+      if (!orderData) {
         throw createError("Order not found", 404, "ORDER_NOT_FOUND");
       }
+      await OrderModel.refuseOrder(order_id, seller_id);
 
-      if (order.status !== "completed") {
-        throw createError(
-          "Only completed orders can be refunded",
-          400,
-          "INVALID_ORDER_STATUS"
-        );
+      // get allowed notification preference
+      const allowedNotificationPreference =
+        await sendGetAllowNotificationPreference(customer_id);
+
+      // create notification
+      if (allowedNotificationPreference.order_refused) {
+        const notificationData = {
+          title: "Order refused",
+          content: `Order ${order_id} has been refused by seller`,
+          notification_type: "order_notification",
+          target_type: "individual",
+          target_ids: [orderData.customer_id],
+          can_delete: false,
+          can_mark_as_read: true,
+          is_read: false,
+          created_at: new Date(),
+        };
+        await sendCreateNewNotification(notificationData);
       }
 
-      if (refund_amount > order.totalAmount) {
-        throw createError(
-          "Refund amount cannot exceed the order total",
-          400,
-          "INVALID_REFUND_AMOUNT"
-        );
-      }
+      // Create order log
+      const orderLogData = {
+        order_id,
+        title: "Order refused",
+        content: "Order refused successfully",
+        created_at: new Date(),
+      };
+      await OrderLogModel.newOrderLog(orderLogData);
 
-      const session = await startSession();
-      try {
-        session.startTransaction();
-
-        const refund = await PaymentModel.createRefund(
-          order_id,
-          refund_amount,
-          refund_reason,
-          { session }
-        );
-
-        await OrderModel.updateOrderStatus(order_id, "refunded", { session });
-
-        await session.commitTransaction();
-        return refund;
-      } catch (error) {
-        await session.abortTransaction();
-        logger.error(`Error refunding order ${order_id}: ${error.message}`);
-        throw createError(
-          "Failed to process refund",
-          500,
-          "REFUND_PROCESSING_FAILED"
-        );
-      } finally {
-        await session.endSession();
-      }
-    }),
-
-  getOrderAnalytics: (req, res) =>
-    handleRequest(req, res, async (req) => {
-      const { startDate, endDate } = req.query;
-      const analytics = await OrderModel.getOrderAnalytics(startDate, endDate);
-      return analytics;
-    }),
-
-  getReversals: (req, res) =>
-    handleRequest(req, res, async (req) => {
-      const reversals = await ReversalModel.getReversals();
-      return reversals;
-    }),
-
-  createReversal: (req, res) =>
-    handleRequest(req, res, async (req) => {
-      const { order_id, reason } = req.body;
-      const order = await OrderModel.getOrder(order_id);
-      if (!order) {
-        throw createError("Order not found", 404, "ORDER_NOT_FOUND");
-      }
-
-      const session = await startSession();
-      try {
-        session.startTransaction();
-
-        const reversal = await ReversalModel.createReversal(order_id, reason, {
-          session,
-        });
-
-        await OrderModel.updateOrderStatus(order_id, "reversed", { session });
-
-        await Promise.all(
-          order.orderItems.map(async (item) => {
-            await updateVariantStock(
-              item.product_id,
-              item.variant_id,
-              item.quantity,
-              { session }
-            );
-          })
-        );
-
-        await session.commitTransaction();
-        return reversal;
-      } catch (error) {
-        await session.abortTransaction();
-        logger.error(
-          `Error creating reversal for order ${order_id}: ${error.message}`
-        );
-        throw createError(
-          "Failed to create reversal",
-          500,
-          "REVERSAL_CREATION_FAILED"
-        );
-      } finally {
-        await session.endSession();
-      }
+      // Product analytic
+      await updateValueAnalyticProduct(
+        orderData.product_id,
+        "orders_refused",
+        1
+      );
     }),
 };
 
