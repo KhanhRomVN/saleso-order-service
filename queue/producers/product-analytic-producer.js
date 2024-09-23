@@ -15,10 +15,6 @@ const updateValueAnalyticProduct = async (product_id, key, value) => {
       Buffer.from(JSON.stringify({ product_id, key, value })),
       { persistent: true }
     );
-
-    console.log(
-      `Sent update product analytic request for Product ID: ${product_id}, Key: ${key}, Value: ${value}`
-    );
   } catch (error) {
     console.error("Error in updateValueAnalyticProduct producer:", error);
     throw error;

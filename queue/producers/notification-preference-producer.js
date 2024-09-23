@@ -17,10 +17,6 @@ async function sendNewNotificationPreference(userId, role) {
       persistent: true,
     });
 
-    console.log(
-      `Sent notification preference for user ${userId} with role ${role} to queue`
-    );
-
     await channel.close();
   } catch (error) {
     console.error("Error in sendNotificationPreference:", error);
@@ -42,10 +38,6 @@ async function sendGetAllowNotificationPreference(userId, role) {
     channel.sendToQueue(GET_ALLOW_PREFERENCE_QUEUE, Buffer.from(message), {
       persistent: true,
     });
-
-    console.log(
-      `Sent request to get allowed notification preferences for user ${userId}`
-    );
 
     await channel.close();
   } catch (error) {

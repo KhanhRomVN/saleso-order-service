@@ -210,8 +210,6 @@ const CartModel = {
   },
 };
 
-cron.schedule("* * * * *", () => {
-  console.log("[Order-service] - Node-cron has started!");
-});
+cron.schedule("* * * * *", () => {});
 
 module.exports = CartModel;
