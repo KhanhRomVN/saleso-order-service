@@ -14,7 +14,7 @@ const { handleRequest, createError } = require("../services/responseHandler");
 const CartController = {
   getCart: (req, res) =>
     handleRequest(req, res, async (req) => {
-      if (!req.user || !req.user._id) {
+      if (!req.user) {
         throw createError("User not authenticated", 401, "UNAUTHORIZED");
       }
       const customer_id = req.user._id.toString();
@@ -98,7 +98,6 @@ const CartController = {
       }
       const customer_id = req.user._id.toString();
       await CartModel.removeItem(customer_id, product_id);
-      await updateValueAnalyticProduct(product_id, "cart_removed", 1);
       return { message: "Item removed from cart successfully" };
     }),
 

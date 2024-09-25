@@ -171,6 +171,45 @@ const OrderModel = {
       return { message: "Order refused successfully" };
     });
   },
+
+  getTop5CustomerAnalytic: async (seller_id) => {
+    return handleDBOperation(async (collection) => {
+      if (!seller_id) {
+        throw createError("Seller ID is required", 400, "MISSING_SELLER_ID");
+      }
+
+      const pipeline = [
+        {
+          $match: {
+            seller_id: seller_id,
+            order_status: "accepted",
+          },
+        },
+        {
+          $group: {
+            _id: "$customer_id",
+            total_amount: { $sum: "$total_amount" },
+          },
+        },
+        {
+          $sort: { total_amount: -1 },
+        },
+        {
+          $limit: 5,
+        },
+        {
+          $project: {
+            customer_id: "$_id",
+            total_amount: 1,
+            _id: 0,
+          },
+        },
+      ];
+
+      const result = await collection.aggregate(pipeline).toArray();
+      return result;
+    });
+  },
 };
 
 module.exports = OrderModel;

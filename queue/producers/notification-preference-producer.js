@@ -34,21 +34,42 @@ async function sendGetAllowNotificationPreference(userId, role) {
 
     await channel.assertQueue(GET_ALLOW_PREFERENCE_QUEUE, { durable: true });
 
+    const correlationId = generateUuid();
     const message = JSON.stringify({ userId, role });
-    channel.sendToQueue(GET_ALLOW_PREFERENCE_QUEUE, Buffer.from(message), {
-      persistent: true,
-    });
 
-    await channel.close();
+    return new Promise((resolve, reject) => {
+      channel.consume(
+        GET_ALLOW_PREFERENCE_QUEUE,
+        (msg) => {
+          if (msg.properties.correlationId === correlationId) {
+            const response = JSON.parse(msg.content.toString());
+            resolve(response);
+            channel.close();
+            connection.close();
+          }
+        },
+        { noAck: true }
+      );
+
+      channel.sendToQueue(GET_ALLOW_PREFERENCE_QUEUE, Buffer.from(message), {
+        correlationId: correlationId,
+        replyTo: GET_ALLOW_PREFERENCE_QUEUE,
+      });
+    });
   } catch (error) {
     console.error("Error in sendGetAllowNotificationPreference:", error);
     throw error;
-  } finally {
-    if (connection) await connection.close();
   }
 }
 
+function generateUuid() {
+  return (
+    Math.random().toString() +
+    Math.random().toString() +
+    Math.random().toString()
+  );
+}
+
 module.exports = {
-  sendNewNotificationPreference,
   sendGetAllowNotificationPreference,
 };

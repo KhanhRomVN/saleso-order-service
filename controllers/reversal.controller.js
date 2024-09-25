@@ -17,7 +17,14 @@ const ReversalController = {
         customer_id,
         seller_id
       );
-      await updateValueAnalyticProduct(seller_id, "reversal_requested", 1);
+
+      const order = await OrderModel.getOrderById(order_id);
+      // update product analytic
+      await updateValueAnalyticProduct(
+        order.product_id,
+        "reversal_requested",
+        1
+      );
 
       // get allowed notification preference
       const allowedNotificationPreference =
@@ -57,7 +64,12 @@ const ReversalController = {
       const { order_id } = req.params;
       const seller_id = req.user._id.toString();
       await ReversalModel.acceptReversal(order_id, seller_id);
-      await updateValueAnalyticProduct(seller_id, "reversal_accepted", 1);
+      const order = await OrderModel.getOrderById(order_id);
+      await updateValueAnalyticProduct(
+        order.product_id,
+        "reversal_successful",
+        1
+      );
 
       // get allowed notification preference
       const allowedNotificationPreference =
@@ -97,7 +109,8 @@ const ReversalController = {
       const { order_id } = req.params;
       const seller_id = req.user._id.toString();
       await ReversalModel.refuseReversal(order_id, seller_id);
-      await updateValueAnalyticProduct(seller_id, "reversal_refused", 1);
+      const order = await OrderModel.getOrderById(order_id);
+      await updateValueAnalyticProduct(order.product_id, "order_failed", 1);
 
       // get allowed notification preference
       const allowedNotificationPreference =

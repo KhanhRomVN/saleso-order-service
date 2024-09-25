@@ -42,35 +42,38 @@ const getProductById = async (productId) => {
   }
 };
 
-const updateStockProduct = async (productId, stockValue, sku, session) => {
+const updateStockProduct = async (productId, stockValue, sku) => {
   let connection;
   let channel;
-
   try {
     connection = await amqp.connect(process.env.RABBITMQ_URL);
     channel = await connection.createChannel();
     const queue = "update_stock_queue";
     const correlationId = generateUuid();
 
-    const replyQueue = "amq.rabbitmq.reply-to";
-
     return new Promise((resolve, reject) => {
-      channel.consume(replyQueue, (msg) => {
-        if (msg.properties.correlationId === correlationId) {
-          const content = JSON.parse(msg.content.toString());
-          if (content.error) {
-            reject(new Error(content.error));
-          } else {
-            resolve(content);
+      const replyQueue = "amq.rabbitmq.reply-to";
+
+      channel.consume(
+        replyQueue,
+        (msg) => {
+          if (msg.properties.correlationId === correlationId) {
+            const content = JSON.parse(msg.content.toString());
+            if (content.error) {
+              reject(new Error(content.error));
+            } else {
+              resolve(content);
+            }
+            channel.close();
+            connection.close();
           }
-          channel.close();
-          connection.close();
-        }
-      });
+        },
+        { noAck: true }
+      );
 
       channel.sendToQueue(
         queue,
-        Buffer.from(JSON.stringify({ productId, stockValue, sku, session })),
+        Buffer.from(JSON.stringify({ productId, stockValue, sku })),
         {
           correlationId: correlationId,
           replyTo: replyQueue,
@@ -79,7 +82,6 @@ const updateStockProduct = async (productId, stockValue, sku, session) => {
     });
   } catch (error) {
     console.error("Error in updateStockProductProducer:", error);
-
     if (channel) await channel.close();
     if (connection) await connection.close();
     throw error;

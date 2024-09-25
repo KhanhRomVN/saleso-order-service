@@ -38,122 +38,97 @@ const OrderController = {
       const session = await startSession();
 
       try {
-        let createdOrderIds;
         await session.withTransaction(async () => {
           // 1. Process orders and update stock
-          const processedOrders = await Promise.all(
-            orderItems.map(async (item) => {
-              const product = await getProductById(item.product_id, session);
-              if (!product) {
-                throw new Error(`Product not found: ${item.product_id}`);
-              }
-
-              await updateStockProduct(
-                item.product_id,
-                -item.quantity,
-                item.sku,
-                session
-              );
-
-              return {
-                ...item,
-                customer_id,
-                seller_id: product.seller_id,
-                order_status: "pending",
-              };
-            })
+          const productPromises = orderItems.map((item) =>
+            getProductById(item.product_id)
           );
+          const products = await Promise.all(productPromises);
+
+          const processedOrders = orderItems.map((item, index) => {
+            const product = products[index];
+            if (!product) {
+              throw new Error(`Product not found: ${item.product_id}`);
+            }
+
+            return {
+              ...item,
+              customer_id,
+              seller_id: product.seller_id,
+              order_status: "pending",
+            };
+          });
+
+          const updateStockPromises = processedOrders.map((item) =>
+            updateStockProduct(item.product_id, -item.quantity, item.sku)
+          );
+          await Promise.all(updateStockPromises);
 
           // 2. Create orders
-          createdOrderIds = await OrderModel.createOrders(
+          const createdOrderIds = await OrderModel.createOrders(
             processedOrders,
-            customer_id,
-            session
+            customer_id
           );
 
           // 3. Create payments
-          await Promise.all(
-            createdOrderIds.map(async (order) => {
-              const paymentData = {
-                order_id: order.order_id,
-                customer_id,
-                seller_id: order.seller_id,
-                method: payment_method,
-                status: payment_status,
-                amount: order.total_amount, // Assuming total_amount is available in the order object
-              };
-              await PaymentModel.createPayment(paymentData, session);
-            })
-          );
+          const paymentPromises = createdOrderIds.map((order) => {
+            const paymentData = {
+              order_id: order.order_id.toString(),
+              customer_id,
+              seller_id: order.seller_id,
+              method: payment_method,
+              status: payment_status,
+            };
+            return PaymentModel.createPayment(paymentData);
+          });
+          await Promise.all(paymentPromises);
 
           // 4. Remove items from cart
-          await Promise.all(
-            orderItems.map(async (item) => {
-              await CartModel.removeItem(customer_id, item.product_id, session);
-            })
+          const removeCartPromises = orderItems.map((item) =>
+            CartModel.removeItem(customer_id, item.product_id)
           );
+          await Promise.all(removeCartPromises);
 
           // 5. Update Product Analytic
-          await Promise.all(
-            processedOrders.map(async (item) => {
-              await updateValueAnalyticProduct(
-                item.product_id,
-                "orders_placed",
-                1
-              );
-            })
+          const updateAnalyticPromises = processedOrders.map((item) =>
+            updateValueAnalyticProduct(item.product_id, "orders_placed", 1)
           );
+          await Promise.all(updateAnalyticPromises);
 
           // 6. Create order log
-          await Promise.all(
-            createdOrderIds.map(async (order) => {
-              const orderLogData = {
-                order_id: order.order_id,
-                title: "Order created",
-                content: "Order created successfully",
-                created_at: new Date(),
-              };
-              await OrderLogModel.newOrderLog(orderLogData);
-            })
-          );
+          const orderLogPromises = createdOrderIds.map((order) => {
+            const orderLogData = {
+              order_id: order.order_id.toString(),
+              title: "Order created",
+              content: "Order created successfully",
+              created_at: new Date(),
+            };
+            return OrderLogModel.newOrderLog(orderLogData);
+          });
+          await Promise.all(orderLogPromises);
 
-          // 7. get allowed notification preference
-          const allowedNotificationPreference =
-            await sendGetAllowNotificationPreference(customer_id);
-
-          // 8. create notification
-          if (allowedNotificationPreference.order_created) {
-            await Promise.all(
-              createdOrderIds.map(async (order) => {
-                const notificationData = {
-                  title: "Order created",
-                  content: `You have a new order from ${order.customer_id}`,
-                  notification_type: "order_notification",
-                  target_type: "individual",
-                  target_ids: [order.seller_id],
-                  can_delete: false,
-                  can_mark_as_read: true,
-                  is_read: false,
-                  created_at: new Date(),
-                };
-                await sendCreateNewNotification(notificationData);
-              })
-            );
-          }
-
-          logger.info(
-            `Orders created successfully for customer ${customer_id}`
-          );
+          // 7. Create notification
+          const notificationPromises = createdOrderIds.map((order) => {
+            const notificationData = {
+              title: "You have new order",
+              content: `You have new order with order id ${order.order_id}`,
+              notification_type: "order_notification",
+              target_type: "individual",
+              target_ids: [order.seller_id],
+              can_delete: false,
+              can_mark_as_read: true,
+              is_read: false,
+              created_at: new Date(),
+            };
+            return sendCreateNewNotification(notificationData);
+          });
+          await Promise.all(notificationPromises);
         });
 
         return {
           message: "Order created successfully",
-          orderIds: createdOrderIds.map((order) => order.order_id),
         };
       } catch (error) {
-        logger.error(
-          `Error creating order for customer ${customer_id}: ${error.message}`
-        );
         throw error;
       } finally {
         await session.endSession();
@@ -180,7 +155,7 @@ const OrderController = {
               shipping_address,
               order_status,
             } = order;
-            const product = await ProductMode.getProductById(product_id);
+            const product = await getProductById(product_id);
             const customer = await getUserById(customer_id, "customer");
             orderData = {
               _id,
@@ -229,26 +204,25 @@ const OrderController = {
   getOrder: (req, res) =>
     handleRequest(req, res, async (req) => {
       const { order_id } = req.params;
-      const customer_id = req.user._id.toString();
-      const order = await OrderModel.getOrderById(order_id);
-      if (!order) {
-        throw createError("Order not found", 404, "ORDER_NOT_FOUND");
-      }
-      if (order.customer_id !== customer_id) {
-        throw createError(
-          "Unauthorized access to order",
-          403,
-          "UNAUTHORIZED_ACCESS"
-        );
-      }
-      return order;
+      const orderData = await OrderModel.getOrderById(order_id);
+      const orderLogData = await OrderLogModel.getOrderLogByOrderId(order_id);
+      const productData = await getProductById(orderData.product_id);
+      const customerData = await getUserById(orderData.customer_id, "customer");
+      const paymentData = await PaymentModel.getPayment(order_id);
+      return {
+        orderData,
+        orderLogData,
+        productData,
+        customerData,
+        paymentData,
+      };
     }),
 
   cancelOrder: (req, res) =>
     handleRequest(req, res, async (req) => {
       const { order_id } = req.params;
       const customer_id = req.user._id.toString();
-      const orderData = await OrderModel.getOrder(order_id);
+      const orderData = await OrderModel.getOrderById(order_id);
       if (!orderData) {
         throw createError("Order not found", 404, "ORDER_NOT_FOUND");
       }
@@ -293,7 +267,7 @@ const OrderController = {
       // Product analytic
       await updateValueAnalyticProduct(
         orderData.product_id,
-        "orders_cancelled",
+        "order_refused",
         1
       );
       return { message: "Order cancelled successfully" };
@@ -303,7 +277,7 @@ const OrderController = {
     handleRequest(req, res, async (req) => {
       const { order_id } = req.params;
       const seller_id = req.user._id.toString();
-      const orderData = await OrderModel.getOrder(order_id);
+      const orderData = await OrderModel.getOrderById(order_id);
       if (!orderData) {
         throw createError("Order not found", 404, "ORDER_NOT_FOUND");
       }
@@ -311,7 +285,7 @@ const OrderController = {
 
       // get allowed notification preference
       const allowedNotificationPreference =
-        await sendGetAllowNotificationPreference(customer_id);
+        await sendGetAllowNotificationPreference(orderData.customer_id);
 
       // create notification
       if (allowedNotificationPreference.order_accepted) {
@@ -341,8 +315,13 @@ const OrderController = {
       // Product analytic
       await updateValueAnalyticProduct(
         orderData.product_id,
-        "orders_accepted",
+        "order_successful",
         1
+      );
+      await updateValueAnalyticProduct(
+        orderData.product_id,
+        "revenue",
+        orderData.total_amount
       );
     }),
 
@@ -350,7 +329,7 @@ const OrderController = {
     handleRequest(req, res, async (req) => {
       const { order_id } = req.params;
       const seller_id = req.user._id.toString();
-      const orderData = await OrderModel.getOrder(order_id);
+      const orderData = await OrderModel.getOrderById(order_id);
       if (!orderData) {
         throw createError("Order not found", 404, "ORDER_NOT_FOUND");
       }
@@ -358,7 +337,7 @@ const OrderController = {
 
       // get allowed notification preference
       const allowedNotificationPreference =
-        await sendGetAllowNotificationPreference(customer_id);
+        await sendGetAllowNotificationPreference(orderData.customer_id);
 
       // create notification
       if (allowedNotificationPreference.order_refused) {
@@ -386,11 +365,7 @@ const OrderController = {
       await OrderLogModel.newOrderLog(orderLogData);
 
       // Product analytic
-      await updateValueAnalyticProduct(
-        orderData.product_id,
-        "orders_refused",
-        1
-      );
+      await updateValueAnalyticProduct(orderData.product_id, "order_failed", 1);
     }),
 };
 

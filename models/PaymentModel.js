@@ -6,8 +6,10 @@ const { createError } = require("../services/responseHandler");
 const COLLECTION_NAME = "payments";
 const COLLECTION_SCHEMA = Joi.object({
   order_id: Joi.string().required(),
+  customer_id: Joi.string().required(),
+  seller_id: Joi.string().required(),
   method: Joi.string().valid("prepaid", "postpaid").required(),
-  status: Joi.string().valid("pending", "completed", "failed").required(),
+  status: Joi.string().valid("unpaid", "paid").required(),
   created_at: Joi.date().default(Date.now),
   updated_at: Joi.date().default(Date.now),
 }).options({ abortEarly: false });
@@ -34,47 +36,20 @@ const handleDBOperation = async (operation) => {
 
 const PaymentModel = {
   // when customer create order
-  createPayment: async (paymentData, session) => {
+  createPayment: async (paymentData) => {
     return handleDBOperation(async (collection) => {
-      if (
-        !paymentData ||
-        !paymentData.order_id ||
-        !paymentData.customer_id ||
-        !paymentData.seller_id
-      ) {
-        throw createError(
-          "Missing required payment data",
-          400,
-          "MISSING_REQUIRED_FIELDS"
-        );
-      }
-
       const payment = {
-        order_id: new ObjectId(paymentData.order_id),
-        customer_id: new ObjectId(paymentData.customer_id),
-        seller_id: new ObjectId(paymentData.seller_id),
-        method: paymentData.method || "prepaid",
-        status: paymentData.status || "pending",
+        order_id: paymentData.order_id,
+        customer_id: paymentData.customer_id,
+        seller_id: paymentData.seller_id,
+        method: paymentData.method,
+        status: paymentData.status,
         created_at: new Date(),
         updated_at: new Date(),
       };
 
       validatePayment(payment);
-
-      const result = await collection.insertOne(payment, { session });
-
-      if (!result.insertedId) {
-        throw createError(
-          "Failed to create payment",
-          500,
-          "PAYMENT_CREATION_FAILED"
-        );
-      }
-
-      return {
-        message: "Payment created successfully",
-        payment_id: result.insertedId.toString(),
-      };
+      await collection.insertOne(payment);
     });
   },
 
@@ -85,7 +60,7 @@ const PaymentModel = {
       }
 
       const payment = await collection.findOne({
-        order_id: new ObjectId(order_id),
+        order_id,
       });
 
       if (!payment) {

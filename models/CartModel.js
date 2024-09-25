@@ -118,23 +118,12 @@ const CartModel = {
 
   removeItem: async (customer_id, product_id) => {
     return handleDBOperation(async (collection) => {
-      if (!customer_id || !product_id) {
-        throw createError(
-          "Customer ID and Product ID are required",
-          400,
-          "MISSING_REQUIRED_FIELDS"
-        );
-      }
-      const result = await collection.updateOne(
-        { customer_id: new ObjectId(customer_id) },
+      await collection.updateOne(
+        { customer_id },
         {
-          $pull: { items: { product_id: new ObjectId(product_id) } },
+          $pull: { items: { product_id } },
         }
       );
-      if (result.modifiedCount === 0) {
-        throw createError("Item not found in cart", 404, "ITEM_NOT_FOUND");
-      }
-      return { message: "Item removed from cart successfully" };
     });
   },
 

@@ -24,7 +24,7 @@ const routes = [
   {
     method: "get",
     path: "/get/:order_id",
-    middleware: [authSellerToken, rateLimiter],
+    middleware: [authSellerToken],
     handler: OrderController.getOrder,
   },
   {

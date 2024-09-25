@@ -37,7 +37,7 @@ const OrderLogModel = {
           "INVALID_ORDER_LOG_DATA"
         );
       }
-      await collection.insertOne(orderLogData, { session });
+      await collection.insertOne(orderLogData);
     });
   },
 

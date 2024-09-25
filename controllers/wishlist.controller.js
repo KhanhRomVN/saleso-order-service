@@ -97,7 +97,6 @@ const WishlistController = {
           "PRODUCT_NOT_IN_WISHLIST"
         );
       }
-      await updateValueAnalyticProduct(product_id, "wishlist_removed", 1);
       return { success: "Removed product from wishlist successfully" };
     }),
 
